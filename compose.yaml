@@ -1,0 +1,7 @@
+services:
+  web:
+    image: nginx:alpine
+    container_name: 04-09-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
