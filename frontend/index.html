@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YOLO26n · Cámara</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #eef2ff; }
+    main { width: min(100% - 2rem, 1100px); margin: 2rem auto; }
+    .viewer { position: relative; overflow: hidden; border-radius: 18px; background: #020617; aspect-ratio: 16/9; }
+    video, canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+    canvas { pointer-events: none; }
+    .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+    button { border: 0; border-radius: 999px; padding: .8rem 1.2rem; font-weight: 700; cursor: pointer; }
+    #start { background: #22c55e; color: #052e16; }
+    #stop { background: #ef4444; color: white; }
+    #stop:disabled { opacity: .45; }
+    #status { color: #a5b4fc; }
+    #detections { display: grid; gap: .5rem; padding: 0; list-style: none; }
+    #detections li { background: #172036; padding: .75rem 1rem; border-radius: 10px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Detección con YOLO26n</h1>
+  <p>La cámara se procesa en tu navegador y solo se envían fotogramas al backend mientras la detección está activa.</p>
+  <div class="viewer">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div class="controls">
+    <button id="start">Iniciar cámara</button>
+    <button id="stop" disabled>Detener</button>
+    <span id="status">Cámara detenida</span>
+  </div>
+  <ul id="detections"></ul>
+</main>
+<script>
+  const video = document.querySelector('#video');
+  const overlay = document.querySelector('#overlay');
+  const capture = document.createElement('canvas');
+  const startButton = document.querySelector('#start');
+  const stopButton = document.querySelector('#stop');
+  const status = document.querySelector('#status');
+  const list = document.querySelector('#detections');
+  let stream = null;
+  let active = false;
+
+  function draw(data) {
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    const ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.lineWidth = Math.max(2, overlay.width / 320);
+    ctx.font = `${Math.max(14, overlay.width / 45)}px system-ui`;
+    ctx.strokeStyle = '#22c55e';
+    ctx.fillStyle = '#22c55e';
+    for (const detection of data.detections) {
+      const box = detection.box;
+      ctx.strokeRect(box.x_min, box.y_min, box.x_max - box.x_min, box.y_max - box.y_min);
+      ctx.fillText(`${detection.class_name} ${Math.round(detection.confidence * 100)}%`, box.x_min, Math.max(20, box.y_min - 6));
+    }
+    list.innerHTML = data.detections.map(item =>
+      `<li>${item.class_name}: ${(item.confidence * 100).toFixed(1)}%</li>`
+    ).join('');
+    status.textContent = `${data.detections.length} detecciones · ${data.inference_ms} ms`;
+  }
+
+  async function inferenceLoop() {
+    if (!active) return;
+    if (video.readyState >= 2) {
+      capture.width = video.videoWidth;
+      capture.height = video.videoHeight;
+      capture.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise(resolve => capture.toBlob(resolve, 'image/jpeg', 0.8));
+      const form = new FormData();
+      form.append('file', blob, 'camera.jpg');
+      try {
+        const response = await fetch('/api/detect', { method: 'POST', body: form });
+        const contentType = response.headers.get('content-type') || '';
+        if (!response.ok) {
+          let message = 'Backend YOLO no disponible (HTTP ' + response.status + ')';
+          if (contentType.includes('application/json')) {
+            const errorBody = await response.json();
+            message = errorBody.detail || message;
+          }
+          throw new Error(message);
+        }
+        if (!contentType.includes('application/json')) {
+          throw new Error('El backend devolvió una respuesta no válida');
+        }
+        draw(await response.json());
+      } catch (error) {
+        status.textContent = 'Cámara activa · ' + error.message;
+        return;
+      }
+    }
+    if (active) setTimeout(inferenceLoop, 500);
+  }
+
+  startButton.addEventListener('click', async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+      active = true;
+      startButton.disabled = true;
+      stopButton.disabled = false;
+      status.textContent = 'Iniciando modelo…';
+      inferenceLoop();
+    } catch (error) {
+      status.textContent = `No se pudo abrir la cámara: ${error.message}`;
+    }
+  });
+
+  stopButton.addEventListener('click', () => {
+    active = false;
+    stream?.getTracks().forEach(track => track.stop());
+    stream = null;
+    video.srcObject = null;
+    overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    status.textContent = 'Cámara detenida';
+  });
+</script>
+</body>
+</html>
